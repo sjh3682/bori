@@ -28,6 +28,7 @@ import requests
 import re
 import html
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 
@@ -90,6 +91,56 @@ def find_ad_keyword(title, description):
 
 
 # ──────────────────────────────────────────────
+#  블로그 본문 전체를 가져와 광고 키워드를 검사하는 함수
+# ──────────────────────────────────────────────
+def check_full_post(link):
+    """블로그 링크에 접속해 본문 전체 텍스트에서 광고 키워드를 찾습니다.
+    네이버 블로그는 실제 내용이 iframe 안에 있어,
+    iframe 주소(PostView)로 다시 접속해 본문을 가져옵니다.
+    발견되면 키워드를, 없거나 실패하면 None을 반환합니다."""
+    headers = {
+        # 일반 브라우저인 것처럼 보이게 하는 표시 (없으면 차단될 수 있음)
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    }
+    try:
+        # 1) 블로그 글에 먼저 접속
+        resp = requests.get(link, headers=headers, timeout=5)
+        if resp.status_code != 200:
+            return None
+        page = resp.text
+
+        # 2) 네이버 블로그는 본문이 iframe 안에 있음 -> iframe 실제 주소를 찾음
+        #    예: <iframe ... src="/PostView.naver?blogId=...&logNo=..." ...>
+        m = re.search(r'mainFrame["\']?\s*[,)]?.*?src=["\']([^"\']+)["\']', page)
+        if not m:
+            m = re.search(r'<iframe[^>]+id=["\']mainFrame["\'][^>]+src=["\']([^"\']+)["\']', page)
+        if m:
+            iframe_src = m.group(1)
+            if iframe_src.startswith("/"):
+                iframe_src = "https://blog.naver.com" + iframe_src
+            resp2 = requests.get(iframe_src, headers=headers, timeout=5)
+            if resp2.status_code == 200:
+                page = resp2.text  # iframe 안의 실제 본문으로 교체
+
+        # 3) HTML 태그를 모두 제거해 순수 텍스트만 남김
+        text = re.sub(r"<script[^>]*>.*?</script>", " ", page, flags=re.DOTALL)
+        text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = html.unescape(text)
+
+        # 4) 본문 전체에서 광고 키워드 검사
+        lowered = text.lower()
+        for keyword in AD_KEYWORDS:
+            if keyword.lower() in lowered:
+                return keyword
+        return None
+    except Exception:
+        # 접속 실패, 시간 초과 등은 조용히 넘어감 (정상으로 둠)
+        return None
+
+
+# ──────────────────────────────────────────────
 #  네이버 블로그 검색 API 호출 함수
 # ──────────────────────────────────────────────
 def search_naver_blog(query, display=20):
@@ -123,7 +174,12 @@ def search_naver_blog(query, display=20):
 @app.route("/api/search")
 def api_search():
     """브라우저에서 검색어를 받아 네이버에 요청하고,
-    필터링한 결과를 JSON으로 돌려줍니다."""
+    필터링한 결과를 JSON으로 돌려줍니다.
+
+    [2단계 필터링]
+    1단계: 미리보기(빠름)에서 광고 키워드 검사
+    2단계: 1단계에서 안 걸린 글만 본문 전체(느림)를 가져와 재검사
+           여러 글을 동시에 접속해 속도 저하를 줄임"""
     query = request.args.get("q", "").strip()
     if not query:
         return jsonify({"error": "검색어를 입력해주세요."})
@@ -135,7 +191,9 @@ def api_search():
     items = data.get("items", [])
     normal_results = []   # 정상 글
     ad_results = []       # 광고 의심 글
+    need_full_check = []  # 본문 검사가 필요한 글 (1단계 통과)
 
+    # ── 1단계: 미리보기로 빠르게 검사 ──
     for item in items:
         title = clean_text(item.get("title", ""))
         description = clean_text(item.get("description", ""))
@@ -150,7 +208,22 @@ def api_search():
             result["keyword"] = keyword
             ad_results.append(result)
         else:
-            normal_results.append(result)
+            # 미리보기에선 안 걸림 -> 본문 검사 대상으로 보류
+            need_full_check.append(result)
+
+    # ── 2단계: 보류된 글들의 본문을 동시에 검사 ──
+    if need_full_check:
+        links = [r["link"] for r in need_full_check]
+        # 최대 8개씩 동시에 접속 (속도 향상)
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            keywords = list(executor.map(check_full_post, links))
+
+        for result, keyword in zip(need_full_check, keywords):
+            if keyword:
+                result["keyword"] = keyword
+                ad_results.append(result)
+            else:
+                normal_results.append(result)
 
     return jsonify({
         "query": query,
