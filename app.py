@@ -69,6 +69,18 @@ AD_KEYWORDS = [
 
 
 # ──────────────────────────────────────────────
+#  신뢰(내돈내산) 키워드 목록
+#  이 단어가 있으면 광고 키워드가 보여도 정상으로 분류합니다.
+#  (내 돈으로 직접 샀다는 뜻이라 광고와 정반대 신호)
+# ──────────────────────────────────────────────
+TRUST_KEYWORDS = [
+    "내돈내산",
+    "내 돈 내산",
+    "내돈 내산",
+]
+
+
+# ──────────────────────────────────────────────
 #  HTML 태그 및 특수문자 제거 함수
 # ──────────────────────────────────────────────
 def clean_text(text):
@@ -85,8 +97,15 @@ def clean_text(text):
 def find_ad_keyword(title, description):
     """제목 + 본문에서 광고 키워드를 찾습니다.
     대소문자 구분 없이 비교하고,
-    발견되면 해당 키워드를, 없으면 None을 반환합니다."""
+    발견되면 해당 키워드를, 없으면 None을 반환합니다.
+    단, '내돈내산' 같은 신뢰 키워드가 있으면 광고로 치지 않습니다."""
     combined = (title + " " + description).lower()
+
+    # 내돈내산 등 신뢰 키워드가 있으면 무조건 정상으로 분류
+    for trust in TRUST_KEYWORDS:
+        if trust.lower() in combined:
+            return None
+
     for keyword in AD_KEYWORDS:
         if keyword.lower() in combined:
             return keyword
@@ -151,6 +170,12 @@ def check_full_post(link):
 
         # 3) 본문 전체에서 광고 키워드 검사
         lowered = text.lower()
+
+        # 내돈내산 등 신뢰 키워드가 있으면 무조건 정상으로 분류
+        for trust in TRUST_KEYWORDS:
+            if trust.lower() in lowered:
+                return None
+
         for keyword in AD_KEYWORDS:
             if keyword.lower() in lowered:
                 return keyword
