@@ -62,6 +62,9 @@ AD_KEYWORDS = [
     "무상으로 제공",
     "대가를 받고",
     "서비스를 제공받아",
+    "경제적 대가",
+    "대가를 제공받아",
+    "제공받아 작성",
 ]
 
 
@@ -93,10 +96,39 @@ def find_ad_keyword(title, description):
 # ──────────────────────────────────────────────
 #  블로그 본문 전체를 가져와 광고 키워드를 검사하는 함수
 # ──────────────────────────────────────────────
+def fetch_post_text(link, headers):
+    """블로그 링크에서 본문 순수 텍스트를 추출해 반환합니다.
+    네이버 블로그는 본문이 iframe 안에 있어, iframe 주소로 다시 접속합니다.
+    실패하면 빈 문자열을 반환합니다."""
+    resp = requests.get(link, headers=headers, timeout=8)
+    if resp.status_code != 200:
+        return ""
+    page = resp.text
+
+    # iframe 실제 주소를 찾아 본문 페이지로 교체
+    m = re.search(r'mainFrame["\']?\s*[,)]?.*?src=["\']([^"\']+)["\']', page)
+    if not m:
+        m = re.search(r'<iframe[^>]+id=["\']mainFrame["\'][^>]+src=["\']([^"\']+)["\']', page)
+    if m:
+        iframe_src = m.group(1)
+        if iframe_src.startswith("/"):
+            iframe_src = "https://blog.naver.com" + iframe_src
+        resp2 = requests.get(iframe_src, headers=headers, timeout=8)
+        if resp2.status_code == 200:
+            page = resp2.text
+
+    # HTML 태그 제거 후 순수 텍스트만 남김
+    text = re.sub(r"<script[^>]*>.*?</script>", " ", page, flags=re.DOTALL)
+    text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return text
+
+
 def check_full_post(link):
-    """블로그 링크에 접속해 본문 전체 텍스트에서 광고 키워드를 찾습니다.
-    네이버 블로그는 실제 내용이 iframe 안에 있어,
-    iframe 주소(PostView)로 다시 접속해 본문을 가져옵니다.
+    """블로그 본문 전체에서 광고 키워드를 찾습니다.
+    일반 주소로 본문을 못 가져오면 모바일 주소(m.blog.naver.com)로 재시도해
+    탐지 성공률을 높입니다.
     발견되면 키워드를, 없거나 실패하면 None을 반환합니다."""
     headers = {
         # 일반 브라우저인 것처럼 보이게 하는 표시 (없으면 차단될 수 있음)
@@ -104,32 +136,20 @@ def check_full_post(link):
                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     }
     try:
-        # 1) 블로그 글에 먼저 접속
-        resp = requests.get(link, headers=headers, timeout=5)
-        if resp.status_code != 200:
-            return None
-        page = resp.text
+        # 1) 일반 PC 주소로 본문 가져오기 시도
+        text = fetch_post_text(link, headers)
 
-        # 2) 네이버 블로그는 본문이 iframe 안에 있음 -> iframe 실제 주소를 찾음
-        #    예: <iframe ... src="/PostView.naver?blogId=...&logNo=..." ...>
-        m = re.search(r'mainFrame["\']?\s*[,)]?.*?src=["\']([^"\']+)["\']', page)
-        if not m:
-            m = re.search(r'<iframe[^>]+id=["\']mainFrame["\'][^>]+src=["\']([^"\']+)["\']', page)
-        if m:
-            iframe_src = m.group(1)
-            if iframe_src.startswith("/"):
-                iframe_src = "https://blog.naver.com" + iframe_src
-            resp2 = requests.get(iframe_src, headers=headers, timeout=5)
-            if resp2.status_code == 200:
-                page = resp2.text  # iframe 안의 실제 본문으로 교체
+        # 2) 본문이 너무 짧으면(제대로 못 가져왔으면) 모바일 주소로 재시도
+        if len(text.strip()) < 200:
+            mobile_link = link.replace("blog.naver.com", "m.blog.naver.com")
+            try:
+                mobile_text = fetch_post_text(mobile_link, headers)
+                if len(mobile_text) > len(text):
+                    text = mobile_text
+            except Exception:
+                pass
 
-        # 3) HTML 태그를 모두 제거해 순수 텍스트만 남김
-        text = re.sub(r"<script[^>]*>.*?</script>", " ", page, flags=re.DOTALL)
-        text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = html.unescape(text)
-
-        # 4) 본문 전체에서 광고 키워드 검사
+        # 3) 본문 전체에서 광고 키워드 검사
         lowered = text.lower()
         for keyword in AD_KEYWORDS:
             if keyword.lower() in lowered:
